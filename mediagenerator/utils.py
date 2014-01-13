@@ -1,4 +1,5 @@
 from . import settings as media_settings
+from .read_write_lock import RWLock
 from .settings import (GLOBAL_MEDIA_DIRS, PRODUCTION_MEDIA_URL,
     IGNORE_APP_MEDIA_DIRS, MEDIA_GENERATORS, DEV_MEDIA_URL,
     GENERATED_MEDIA_NAMES_MODULE)
@@ -8,6 +9,7 @@ from django.utils.importlib import import_module
 from django.utils.http import urlquote
 import os
 import re
+import threading
 
 try:
     NAMES = import_module(GENERATED_MEDIA_NAMES_MODULE).NAMES
@@ -21,6 +23,11 @@ _generators_cache = []
 _generated_names = {}
 _backend_mapping = {}
 
+# Used to prevent rewriting of _generated_names/_backend_mapping when
+# readers are actively looking at it.
+_generated_names_backend_mapping_rw_lock = RWLock()
+
+
 def _load_generators():
     if not _generators_cache:
         for name in MEDIA_GENERATORS:
@@ -28,17 +35,33 @@ def _load_generators():
             _generators_cache.append(backend)
     return _generators_cache
 
+
 def _refresh_dev_names():
-    _generated_names.clear()
-    _backend_mapping.clear()
+    global _generated_names
+    global _backend_mapping
+
+    to_copy_generated_names = {}
+    to_copy_backend_mapping = {}
+
     for backend in _load_generators():
         for key, url, hash in backend.get_dev_output_names():
+            print "Mediagenerator is now processing %r - %r..." % (key, url)
             versioned_url = urlquote(url)
             if hash:
                 versioned_url += '?version=' + hash
-            _generated_names.setdefault(key, [])
-            _generated_names[key].append(versioned_url)
-            _backend_mapping[url] = backend
+            to_copy_generated_names.setdefault(key, [])
+            to_copy_generated_names[key].append(versioned_url)
+            to_copy_backend_mapping[url] = backend
+
+    _generated_names_backend_mapping_rw_lock.writer_acquire()
+
+    _generated_names.clear()
+    _backend_mapping.clear()
+
+    _generated_names.update(to_copy_generated_names)
+    _backend_mapping.update(to_copy_backend_mapping)
+
+    _generated_names_backend_mapping_rw_lock.writer_release()
 
 class _MatchNothing(object):
     def match(self, content):
@@ -91,7 +114,15 @@ def media_urls(key, refresh=False):
     if media_settings.MEDIA_DEV_MODE:
         if refresh:
             _refresh_dev_names()
-        return [DEV_MEDIA_URL + url for url in _generated_names[key]]
+
+        _generated_names_backend_mapping_rw_lock.reader_acquire()
+
+        try:
+            to_return = [DEV_MEDIA_URL + url for url in _generated_names[key]]
+        finally:
+            _generated_names_backend_mapping_rw_lock.reader_release()
+
+        return to_return
     return [PRODUCTION_MEDIA_URL + get_production_mapping()[key]]
 
 def media_url(key, refresh=False):

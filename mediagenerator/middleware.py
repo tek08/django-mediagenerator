@@ -6,6 +6,7 @@ if MEDIA_DEV_MODE:
     from django.utils.cache import patch_cache_control
     from django.utils.http import http_date
     import time
+import threading
 
 TEXT_MIME_TYPES = (
     'application/x-javascript',
@@ -23,6 +24,36 @@ class MediaMiddleware(object):
     roundtrips for unchanged media.
     """
 
+    def __init__(self):
+        self.dev_names_set = False
+        self.dev_names_lock = threading.Lock()
+
+
+    def _check_and_maybe_regenerate_dev_map(self):
+        """If dev name mapping hasn't been made, make it (thread-safe)."""
+        if self.dev_names_lock.acquire():
+            if not self.dev_names_set:
+                print ""
+                print "=" * 30
+                print "= Media generator needs to rebuild its index...stand by..."
+                print "= "
+                print "= Upset about how long this takes? Keep your JS/CSS small!"
+                print "=" * 30
+                print ""
+
+                _refresh_dev_names()  # only do this first time, others wait
+                self.dev_names_set = True
+
+                print ""
+                print "=" * 30
+                print "= Mediagenerator has finished processing all bundles."
+                print "= Now things should be speedy.  Want speedier?"
+                print "= keep your JS and CSS bundles small!"
+                print "=" * 30
+                print ""
+
+            self.dev_names_lock.release()
+
     MAX_AGE = 60 * 60 * 24 * 365
 
     def process_request(self, request):
@@ -31,7 +62,8 @@ class MediaMiddleware(object):
 
         # We refresh the dev names only once for the whole request, so all
         # media_url() calls are cached.
-        _refresh_dev_names()
+
+        self._check_and_maybe_regenerate_dev_map()
 
         if not request.path.startswith(DEV_MEDIA_URL):
             return
